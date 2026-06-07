@@ -59,38 +59,60 @@ def fetch_stock_snapshot(code: str) -> dict:
 
 
 def fetch_all_snapshots(codes: list = None) -> dict:
-    """批量拉取所有监控股的快照"""
+    """批量拉取所有监控股的快照（带重试机制）"""
     if codes is None:
         codes = [s["code"] for s in STOCKS]
 
     results = {}
-    try:
-        df = ak.stock_zh_a_spot_em()
-        for code in codes:
-            try:
-                row = df[df["代码"] == code]
-                if row.empty:
-                    results[code] = {"error": "未找到", "code": code}
+    max_retries = 3
+
+    for attempt in range(max_retries):
+        try:
+            df = ak.stock_zh_a_spot_em()
+            if df is not None and not df.empty and len(df) > 100:
+                # 成功获取全市场数据
+                for code in codes:
+                    try:
+                        row = df[df["代码"] == code]
+                        if row.empty:
+                            results[code] = {"error": "未找到", "code": code, "is_trading_day": True}
+                            continue
+                        row = row.iloc[0]
+                        results[code] = {
+                            "code": code,
+                            "name": row.get("名称", ""),
+                            "price": float(row.get("最新价", 0)),
+                            "change_pct": float(row.get("涨跌幅", 0)),
+                            "volume": float(row.get("成交量", 0)),
+                            "amount": float(row.get("成交额", 0)),
+                            "pe_ttm": float(row.get("市盈率-动态", 0)) if pd.notna(row.get("市盈率-动态")) else None,
+                            "total_mv": float(row.get("总市值", 0)) / 1e8 if pd.notna(row.get("总市值")) else None,
+                            "turnover": float(row.get("换手率", 0)) if pd.notna(row.get("换手率")) else None,
+                            "update_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "is_trading_day": True,
+                        }
+                    except Exception as e:
+                        results[code] = {"error": str(e), "code": code, "is_trading_day": True}
+
+                missing = [c for c in codes if c not in results]
+                if missing:
+                    for code in missing:
+                        results[code] = fetch_stock_snapshot(code)
+                        time.sleep(0.3)
+                return results
+            else:
+                # 数据异常，重试
+                if attempt < max_retries - 1:
+                    time.sleep(2)
                     continue
-                row = row.iloc[0]
-                results[code] = {
-                    "code": code,
-                    "name": row.get("名称", ""),
-                    "price": float(row.get("最新价", 0)),
-                    "change_pct": float(row.get("涨跌幅", 0)),
-                    "volume": float(row.get("成交量", 0)),
-                    "amount": float(row.get("成交额", 0)),
-                    "pe_ttm": float(row.get("市盈率-动态", 0)) if pd.notna(row.get("市盈率-动态")) else None,
-                    "total_mv": float(row.get("总市值", 0)) / 1e8 if pd.notna(row.get("总市值")) else None,
-                    "turnover": float(row.get("换手率", 0)) if pd.notna(row.get("换手率")) else None,
-                    "update_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "is_trading_day": True,
-                }
-            except Exception as e:
-                results[code] = {"error": str(e), "code": code}
-    except Exception as e:
-        # 批量拉取失败，逐支重试
-        for code in codes:
+        except Exception as e:
+            if attempt < max_retries - 1:
+                time.sleep(2)
+                continue
+
+    # 全部重试失败，逐支拉取
+    for code in codes:
+        if code not in results or "error" in results.get(code, {}):
             results[code] = fetch_stock_snapshot(code)
             time.sleep(0.5)
 
