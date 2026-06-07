@@ -1,15 +1,15 @@
 """
 数据拉取模块
 ============
-使用AKShare获取A股实时行情、PE估值、历史K线数据。
+使用 yfinance (海外可用) + AKShare (国内备用) 获取A股行情。
 支持开盘日和非开盘日。所有数据拉取失败时有降级策略。
 """
 
+import yfinance as yf
 import akshare as ak
 import pandas as pd
 import json
 import os
-import urllib.request
 from datetime import datetime, timedelta
 import time
 
@@ -59,101 +59,91 @@ def fetch_stock_snapshot(code: str) -> dict:
         return {"error": str(e), "code": code, "is_trading_day": is_trading_day()}
 
 
-def fetch_via_sina(code: str) -> dict:
-    """通过新浪财经API拉取单支股票快照（海外可用）"""
+def fetch_via_yfinance(code: str) -> dict:
+    """通过Yahoo Finance拉取单支A股快照（全球可用）"""
     try:
-        # 判断交易所
+        # A股代码转Yahoo Finance格式
         if code.startswith("6") or code.startswith("5"):
-            symbol = f"sh{code}"
+            symbol = f"{code}.SS"  # 上海交易所
         else:
-            symbol = f"sz{code}"
+            symbol = f"{code}.SZ"  # 深圳交易所
 
-        url = f"http://hq.sinajs.cn/list={symbol}"
-        req = urllib.request.Request(url)
-        req.add_header("Referer", "https://finance.sina.com.cn")
-        req.add_header("User-Agent", "Mozilla/5.0")
-        resp = urllib.request.urlopen(url, timeout=10)
-        data = resp.read().decode("gbk", errors="replace")
+        stock = yf.Ticker(symbol)
+        info = stock.info
 
-        # 解析新浪数据格式
-        # var hq_str_sh601127="名称,今开,昨收,最新价,最高,最低,...,成交量,成交额,...,市盈率"
-        if "=" not in data or len(data) < 50:
-            return {"error": "新浪API返回数据异常", "code": code}
-
-        fields = data.split('"')[1].split(",")
-        if len(fields) < 30:
-            return {"error": "数据字段不足", "code": code}
-
-        name = fields[0]
-        price = float(fields[3]) if fields[3] else 0
-        prev_close = float(fields[2]) if fields[2] else 0
+        price = info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose", 0)
+        prev_close = info.get("previousClose", 0)
         change_pct = round((price - prev_close) / prev_close * 100, 2) if prev_close > 0 else 0
-        volume = float(fields[8]) if fields[8] else 0
-        amount = float(fields[9]) if fields[9] else 0
-        pe_ttm = float(fields[-1]) if fields[-1] and fields[-1].replace(".", "").isdigit() else None
-        total_mv = float(fields[-2]) / 1e8 if len(fields) > 40 and fields[-2] and fields[-2].replace(".", "").replace("-", "").isdigit() else None
+
+        pe_ttm = info.get("trailingPE")
+        total_mv = info.get("marketCap") / 1e8 if info.get("marketCap") else None
 
         return {
             "code": code,
-            "name": name,
+            "name": info.get("longName") or info.get("shortName", code),
             "price": price,
             "change_pct": change_pct,
-            "volume": volume,
-            "amount": amount,
+            "volume": info.get("volume", 0) or 0,
+            "amount": 0,
             "pe_ttm": pe_ttm,
             "total_mv": total_mv,
+            "turnover": None,
             "update_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "is_trading_day": True,
+            "source": "yfinance",
         }
     except Exception as e:
-        return {"error": f"新浪API错误:{str(e)}", "code": code}
+        return {"error": f"yfinance错误:{str(e)}", "code": code}
 
 
 def fetch_all_snapshots(codes: list = None) -> dict:
-    """批量拉取所有监控股的快照（新浪优先，AKShare备用）"""
+    """批量拉取所有监控股的快照（yfinance优先，全球可用）"""
     if codes is None:
         codes = [s["code"] for s in STOCKS]
 
     results = {}
 
-    # 方案1：新浪财经API（海外GitHub Actions也可用）
-    for code in codes:
-        result = fetch_via_sina(code)
-        results[code] = result
-        time.sleep(0.2)
+    # 方案1：yfinance批量拉取（海外可用）
+    try:
+        symbols = []
+        for code in codes:
+            if code.startswith("6") or code.startswith("5"):
+                symbols.append(f"{code}.SS")
+            else:
+                symbols.append(f"{code}.SZ")
 
-    sina_ok = sum(1 for r in results.values() if "error" not in r)
+        # yfinance支持批量下载
+        tickers = yf.Tickers(" ".join(symbols))
+        for i, code in enumerate(codes):
+            try:
+                info = tickers.tickers[symbols[i]].info
+                price = info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose", 0)
+                prev_close = info.get("previousClose", 0)
+                change_pct = round((price - prev_close) / prev_close * 100, 2) if prev_close > 0 else 0
 
-    # 方案2：对新浪失败的用AKShare重试
-    if sina_ok < len(codes):
-        try:
-            df = ak.stock_zh_a_spot_em()
-            if df is not None and not df.empty:
-                for code in codes:
-                    if "error" not in results.get(code, {}):
-                        continue
-                    try:
-                        row = df[df["代码"] == code]
-                        if row.empty:
-                            continue
-                        row = row.iloc[0]
-                        results[code] = {
-                            "code": code,
-                            "name": row.get("名称", ""),
-                            "price": float(row.get("最新价", 0)),
-                            "change_pct": float(row.get("涨跌幅", 0)),
-                            "volume": float(row.get("成交量", 0)),
-                            "amount": float(row.get("成交额", 0)),
-                            "pe_ttm": float(row.get("市盈率-动态", 0)) if pd.notna(row.get("市盈率-动态")) else None,
-                            "total_mv": float(row.get("总市值", 0)) / 1e8 if pd.notna(row.get("总市值")) else None,
-                            "turnover": float(row.get("换手率", 0)) if pd.notna(row.get("换手率")) else None,
-                            "update_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            "is_trading_day": True,
-                        }
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+                results[code] = {
+                    "code": code,
+                    "name": info.get("longName") or info.get("shortName", code),
+                    "price": price,
+                    "change_pct": change_pct,
+                    "volume": info.get("volume", 0) or 0,
+                    "amount": 0,
+                    "pe_ttm": info.get("trailingPE"),
+                    "total_mv": info.get("marketCap") / 1e8 if info.get("marketCap") else None,
+                    "turnover": None,
+                    "update_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "is_trading_day": True,
+                    "source": "yfinance",
+                }
+            except Exception as e:
+                results[code] = {"error": f"yfinance:{str(e)[:80]}", "code": code}
+                time.sleep(0.1)
+    except Exception as batch_err:
+        # 批量失败，逐支重试
+        for code in codes:
+            if code not in results:
+                results[code] = fetch_via_yfinance(code)
+                time.sleep(0.3)
 
     return results
 
