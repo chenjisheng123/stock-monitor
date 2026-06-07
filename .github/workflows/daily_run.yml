@@ -18,7 +18,7 @@ jobs:
           python-version: '3.12'
 
       - name: 安装依赖
-        run: pip install akshare pandas numpy openpyxl
+        run: pip install yfinance pandas numpy openpyxl
 
       - name: 配置邮箱
         env:
