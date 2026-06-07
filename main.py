@@ -55,6 +55,9 @@ def ensure_dirs():
 
 def run_daily():
     """每日主流程"""
+    # 自动从GitHub拉取最新代码
+    import subprocess
+    subprocess.run(["git", "pull", "origin", "master"], cwd=os.path.dirname(os.path.abspath(__file__)), capture_output=True, timeout=30)
     print("=" * 60)
     print(f"股票智能监控系统 — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
