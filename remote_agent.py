@@ -19,8 +19,8 @@ WORK_DIR = "/opt/stock-monitor"
 
 # 允许的命令白名单
 ALLOWED_COMMANDS = [
-    "git pull", "git status",
-    "python3 main.py --once",
+    "git pull", "git status", "git -C",
+    "python3 main.py --once", "python3 /opt/", "python3 -c
     "pip3 install", "pip3 list",
     "cat ", "ls ", "head ", "tail ",
     "python3 -c", "echo ", "pwd", "whoami",
