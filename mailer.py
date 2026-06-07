@@ -67,7 +67,7 @@ def send_email(subject: str, html_content: str, recipients: list = None) -> dict
     try:
         msg = MIMEMultipart("alternative")
         msg["Subject"] = subject
-        msg["From"] = f"股票监控系统 <{sender_email}>"
+        msg["From"] = f"StockMonitor <{sender_email}>"
         msg["To"] = ", ".join(recipients)
 
         msg.attach(MIMEText(html_content, "html", "utf-8"))
