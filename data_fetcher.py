@@ -6,7 +6,10 @@
 """
 
 import yfinance as yf
-import akshare as ak
+try:
+    import akshare as ak
+except ImportError:
+    ak = None
 import pandas as pd
 import json
 import os
@@ -20,6 +23,9 @@ def is_trading_day() -> bool:
     """判断今天是否为A股交易日"""
     try:
         today = datetime.now().strftime("%Y%m%d")
+        if ak is None:
+            weekday = datetime.now().weekday()
+            return weekday < 5
         calendar = ak.tool_trade_date_hist_sina()
         trading_dates = calendar["trade_date"].tolist()
         return today in trading_dates
@@ -31,10 +37,15 @@ def is_trading_day() -> bool:
 def fetch_stock_snapshot(code: str) -> dict:
     """
     拉取单支股票快照数据：最新价、PE(TTM)、涨跌幅、成交量、市值
-    返回 dict 或 错误信息
     """
+    # 优先用yfinance
+    result = fetch_via_yfinance(code)
+    if "error" not in result:
+        return result
+    # 备用AKShare
+    if ak is None:
+        return result
     try:
-        # 使用AKShare的个股实时行情
         df = ak.stock_zh_a_spot_em()
         row = df[df["代码"] == code]
 
@@ -149,36 +160,38 @@ def fetch_all_snapshots(codes: list = None) -> dict:
 
 
 def fetch_market_index() -> dict:
-    """拉取大盘指数：沪深300、科创50、创业板指"""
-    indices = {
-        "沪深300": "sh000300",
-        "科创50": "sh000688",
-        "创业板指": "sz399006",
+    """拉取大盘指数：沪深300、科创50、创业板指（yfinance全球可用）"""
+    indices_map = {
+        "沪深300": "000300.SS",
+        "科创50": "000688.SS",
+        "创业板指": "399006.SZ",
     }
     result = {}
     try:
-        df = ak.stock_zh_index_spot_em()
-        for name, symbol in indices.items():
+        for name, symbol in indices_map.items():
             try:
-                # AKShare指数行情用不同字段
-                row = df[df["代码"] == symbol]
-                if not row.empty:
-                    r = row.iloc[0]
-                    result[name] = {
-                        "price": float(r.get("最新价", 0)),
-                        "change_pct": float(r.get("涨跌幅", 0)),
-                    }
+                stock = yf.Ticker(symbol)
+                info = stock.info
+                price = info.get("currentPrice") or info.get("regularMarketPrice", 0)
+                prev = info.get("previousClose", 0)
+                chg = round((price - prev) / prev * 100, 2) if prev > 0 else 0
+                result[name] = {"price": price, "change_pct": chg}
             except Exception:
                 result[name] = {"error": "获取失败"}
-    except Exception as e:
-        for name in indices:
-            result[name] = {"error": str(e)}
+    except Exception:
+        for name in indices_map:
+            result[name] = {"error": "无法获取"}
     return result
+
+
+def fetch_north_flow() -> dict:
 
 
 def fetch_north_flow() -> dict:
     """拉取北向资金流向"""
     try:
+        if ak is None:
+            return {"net_flow": None, "error": "AKShare未安装"}
         df = ak.stock_hsgt_north_net_flow_in_em(symbol="北上")
         latest = df.iloc[-1]
         return {
@@ -193,7 +206,8 @@ def fetch_daily_news() -> list:
     """拉取当日重要财经新闻（用于知识库积累）"""
     news_list = []
     try:
-        # 新浪财经新闻
+        if ak is None:
+            return news_list
         df = ak.stock_info_global_sina()
         if df is not None and not df.empty:
             for _, row in df.head(20).iterrows():
@@ -235,6 +249,8 @@ def fetch_daily_news() -> list:
 def fetch_historical_pe(code: str, days: int = 120) -> list:
     """拉取个股历史PE数据（用于PE分位计算）"""
     try:
+        if ak is None:
+            return []
         df = ak.stock_zh_a_hist(
             symbol=code,
             period="daily",
