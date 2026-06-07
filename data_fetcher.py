@@ -9,6 +9,7 @@ import akshare as ak
 import pandas as pd
 import json
 import os
+import urllib.request
 from datetime import datetime, timedelta
 import time
 
@@ -58,24 +59,82 @@ def fetch_stock_snapshot(code: str) -> dict:
         return {"error": str(e), "code": code, "is_trading_day": is_trading_day()}
 
 
+def fetch_via_sina(code: str) -> dict:
+    """通过新浪财经API拉取单支股票快照（海外可用）"""
+    try:
+        # 判断交易所
+        if code.startswith("6") or code.startswith("5"):
+            symbol = f"sh{code}"
+        else:
+            symbol = f"sz{code}"
+
+        url = f"http://hq.sinajs.cn/list={symbol}"
+        req = urllib.request.Request(url)
+        req.add_header("Referer", "https://finance.sina.com.cn")
+        req.add_header("User-Agent", "Mozilla/5.0")
+        resp = urllib.request.urlopen(url, timeout=10)
+        data = resp.read().decode("gbk", errors="replace")
+
+        # 解析新浪数据格式
+        # var hq_str_sh601127="名称,今开,昨收,最新价,最高,最低,...,成交量,成交额,...,市盈率"
+        if "=" not in data or len(data) < 50:
+            return {"error": "新浪API返回数据异常", "code": code}
+
+        fields = data.split('"')[1].split(",")
+        if len(fields) < 30:
+            return {"error": "数据字段不足", "code": code}
+
+        name = fields[0]
+        price = float(fields[3]) if fields[3] else 0
+        prev_close = float(fields[2]) if fields[2] else 0
+        change_pct = round((price - prev_close) / prev_close * 100, 2) if prev_close > 0 else 0
+        volume = float(fields[8]) if fields[8] else 0
+        amount = float(fields[9]) if fields[9] else 0
+        pe_ttm = float(fields[-1]) if fields[-1] and fields[-1].replace(".", "").isdigit() else None
+        total_mv = float(fields[-2]) / 1e8 if len(fields) > 40 and fields[-2] and fields[-2].replace(".", "").replace("-", "").isdigit() else None
+
+        return {
+            "code": code,
+            "name": name,
+            "price": price,
+            "change_pct": change_pct,
+            "volume": volume,
+            "amount": amount,
+            "pe_ttm": pe_ttm,
+            "total_mv": total_mv,
+            "update_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "is_trading_day": True,
+        }
+    except Exception as e:
+        return {"error": f"新浪API错误:{str(e)}", "code": code}
+
+
 def fetch_all_snapshots(codes: list = None) -> dict:
-    """批量拉取所有监控股的快照（带重试机制）"""
+    """批量拉取所有监控股的快照（新浪优先，AKShare备用）"""
     if codes is None:
         codes = [s["code"] for s in STOCKS]
 
     results = {}
-    max_retries = 3
 
-    for attempt in range(max_retries):
+    # 方案1：新浪财经API（海外GitHub Actions也可用）
+    for code in codes:
+        result = fetch_via_sina(code)
+        results[code] = result
+        time.sleep(0.2)
+
+    sina_ok = sum(1 for r in results.values() if "error" not in r)
+
+    # 方案2：对新浪失败的用AKShare重试
+    if sina_ok < len(codes):
         try:
             df = ak.stock_zh_a_spot_em()
-            if df is not None and not df.empty and len(df) > 100:
-                # 成功获取全市场数据
+            if df is not None and not df.empty:
                 for code in codes:
+                    if "error" not in results.get(code, {}):
+                        continue
                     try:
                         row = df[df["代码"] == code]
                         if row.empty:
-                            results[code] = {"error": "未找到", "code": code, "is_trading_day": True}
                             continue
                         row = row.iloc[0]
                         results[code] = {
@@ -91,30 +150,10 @@ def fetch_all_snapshots(codes: list = None) -> dict:
                             "update_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                             "is_trading_day": True,
                         }
-                    except Exception as e:
-                        results[code] = {"error": str(e), "code": code, "is_trading_day": True}
-
-                missing = [c for c in codes if c not in results]
-                if missing:
-                    for code in missing:
-                        results[code] = fetch_stock_snapshot(code)
-                        time.sleep(0.3)
-                return results
-            else:
-                # 数据异常，重试
-                if attempt < max_retries - 1:
-                    time.sleep(2)
-                    continue
-        except Exception as e:
-            if attempt < max_retries - 1:
-                time.sleep(2)
-                continue
-
-    # 全部重试失败，逐支拉取
-    for code in codes:
-        if code not in results or "error" in results.get(code, {}):
-            results[code] = fetch_stock_snapshot(code)
-            time.sleep(0.5)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     return results
 
